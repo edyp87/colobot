@@ -2558,7 +2558,8 @@ bool CRobotMain::EventFrame(const Event &event)
     m_time += event.rTime;
     if (!m_movieLock && m_pause->GetPause() == PAUSE_NONE) {
         m_gameTime += event.rTime;
-        m_gameTimeAbsolute += m_app->GetRealRelTime() / 1e9f;
+        if(m_app->GetSimulationSpeed() != 0)
+            m_gameTimeAbsolute += event.rTime / m_app->GetSimulationSpeed();
     }
 
     if (!m_immediatSatCom && !m_beginSatCom &&

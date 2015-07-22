@@ -243,6 +243,8 @@ public:
     void            SetSimulationSpeed(float speed);
     float           GetSimulationSpeed() const;
     //@}
+    //! Returns maximum stable simulation speed
+    float           GetMaxStableSimulationSpeed() const;
 
     //! Returns the absolute time counter [seconds]
     float       GetAbsTime() const;
@@ -335,7 +337,7 @@ protected:
     //! If applicable, creates a virtual event to match the changed state as of new event
     Event       CreateVirtualEvent(const Event& sourceEvent);
     //! Prepares a simulation update event
-    TEST_VIRTUAL Event CreateUpdateEvent();
+    TEST_VIRTUAL void CalculateTimeDiff();
     //! Logs debug data for event
     void        LogEvent(const Event& event);
     //! Renders the image in window
@@ -414,9 +416,14 @@ protected:
     float           m_absTime;
     float           m_relTime;
 
+    float           m_updateRemainingTime;
+
     float           m_simulationSpeed;
     bool            m_simulationSuspended;
     //@}
+
+    //! Simulation time step
+    float          m_timeStep;
 
     //! Graphics device to use
     std::string     m_graphics;
@@ -451,6 +458,6 @@ protected:
     //! Screen resoultion overriden by commandline
     bool            m_resolutionOverride;
 
-    //! Headles mode
+    //! Headless mode
     bool            m_headless;
 };

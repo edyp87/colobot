@@ -47,9 +47,9 @@ struct FakeSystemTimeStamp : public SystemTimeStamp
 class CApplicationWrapper : public CApplication
 {
 public:
-    Event CreateUpdateEvent() override
+    void CalculateTimeDiff() override
     {
-        return CApplication::CreateUpdateEvent();
+        CApplication::CalculateTimeDiff();
     }
 };
 
@@ -76,7 +76,7 @@ protected:
     void GetCurrentTimeStamp(SystemTimeStamp *stamp);
     long long TimeStampExactDiff(SystemTimeStamp *before, SystemTimeStamp *after);
 
-    void TestCreateUpdateEvent(long long relTimeExact, long long absTimeExact,
+    void TestCalculateTimeDiff(long long relTimeExact, long long absTimeExact,
                                float relTime, float absTime,
                                long long relTimeReal, long long absTimeReal);
 
@@ -144,13 +144,11 @@ void ApplicationUT::NextInstant(long long diff)
     m_currentTime += diff;
 }
 
-void ApplicationUT::TestCreateUpdateEvent(long long relTimeExact, long long absTimeExact,
+void ApplicationUT::TestCalculateTimeDiff(long long relTimeExact, long long absTimeExact,
                                           float relTime, float absTime,
                                           long long relTimeReal, long long absTimeReal)
 {
-    Event event = m_app->CreateUpdateEvent();
-    EXPECT_EQ(EVENT_FRAME, event.type);
-    EXPECT_FLOAT_EQ(relTime, event.rTime);
+    m_app->CalculateTimeDiff();
     EXPECT_FLOAT_EQ(relTime, m_app->GetRelTime());
     EXPECT_FLOAT_EQ(absTime, m_app->GetAbsTime());
     EXPECT_EQ(relTimeExact, m_app->GetExactRelTime());
@@ -159,15 +157,7 @@ void ApplicationUT::TestCreateUpdateEvent(long long relTimeExact, long long absT
     EXPECT_EQ(absTimeReal, m_app->GetRealAbsTime());
 }
 
-
-TEST_F(ApplicationUT, UpdateEventTimeCalculation_SimulationSuspended)
-{
-    m_app->SuspendSimulation();
-    Event event = m_app->CreateUpdateEvent();
-    EXPECT_EQ(EVENT_NULL, event.type);
-}
-
-TEST_F(ApplicationUT, UpdateEventTimeCalculation_NormalOperation)
+TEST_F(ApplicationUT, UpdateTimeCalculation_NormalOperation)
 {
     // 1st update
 
@@ -180,7 +170,7 @@ TEST_F(ApplicationUT, UpdateEventTimeCalculation_NormalOperation)
 
     NextInstant(relTimeReal);
 
-    TestCreateUpdateEvent(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
+    TestCalculateTimeDiff(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
 
     // 2nd update
 
@@ -193,10 +183,10 @@ TEST_F(ApplicationUT, UpdateEventTimeCalculation_NormalOperation)
 
     NextInstant(relTimeReal);
 
-    TestCreateUpdateEvent(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
+    TestCalculateTimeDiff(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
 }
 
-TEST_F(ApplicationUT, UpdateEventTimeCalculation_NegativeTimeOperation)
+TEST_F(ApplicationUT, UpdateTimeCalculation_NegativeTimeOperation)
 {
     // 1st update
 
@@ -209,17 +199,19 @@ TEST_F(ApplicationUT, UpdateEventTimeCalculation_NegativeTimeOperation)
 
     NextInstant(relTimeReal);
 
-    TestCreateUpdateEvent(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
+    TestCalculateTimeDiff(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
 
     // 2nd update
 
     NextInstant(-1111);
 
-    Event event = m_app->CreateUpdateEvent();
-    EXPECT_EQ(EVENT_NULL, event.type);
+    m_app->CalculateTimeDiff();
+    Event event;
+    m_app->GetEventQueue()->GetEvent(event);
+    EXPECT_EQ(EVENT_SYS_QUIT, event.type);
 }
 
-TEST_F(ApplicationUT, UpdateEventTimeCalculation_ChangingSimulationSpeed)
+TEST_F(ApplicationUT, UpdateTimeCalculation_ChangingSimulationSpeed)
 {
     m_app->SetSimulationSpeed(2.0f);
 
@@ -234,7 +226,7 @@ TEST_F(ApplicationUT, UpdateEventTimeCalculation_ChangingSimulationSpeed)
 
     NextInstant(relTimeReal);
 
-    TestCreateUpdateEvent(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
+    TestCalculateTimeDiff(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
 
     // 2nd update -- speed 2x
 
@@ -247,7 +239,7 @@ TEST_F(ApplicationUT, UpdateEventTimeCalculation_ChangingSimulationSpeed)
 
     NextInstant(relTimeReal);
 
-    TestCreateUpdateEvent(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
+    TestCalculateTimeDiff(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
 
     // 3rd update -- speed 4x
     m_app->SetSimulationSpeed(4.0f);
@@ -261,7 +253,7 @@ TEST_F(ApplicationUT, UpdateEventTimeCalculation_ChangingSimulationSpeed)
 
     NextInstant(relTimeReal);
 
-    TestCreateUpdateEvent(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
+    TestCalculateTimeDiff(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
 
     // 4th update -- speed 1x
     m_app->SetSimulationSpeed(1.0f);
@@ -275,10 +267,10 @@ TEST_F(ApplicationUT, UpdateEventTimeCalculation_ChangingSimulationSpeed)
 
     NextInstant(relTimeReal);
 
-    TestCreateUpdateEvent(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
+    TestCalculateTimeDiff(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
 }
 
-TEST_F(ApplicationUT, UpdateEventTimeCalculation_SuspendingAndResumingSimulation)
+TEST_F(ApplicationUT, UpdateTimeCalculation_SuspendingAndResumingSimulation)
 {
     // 1st update -- simulation enabled
 
@@ -291,7 +283,7 @@ TEST_F(ApplicationUT, UpdateEventTimeCalculation_SuspendingAndResumingSimulation
 
     NextInstant(relTimeReal);
 
-    TestCreateUpdateEvent(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
+    TestCalculateTimeDiff(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
 
     // 2nd update -- simulation suspended
 
@@ -314,5 +306,5 @@ TEST_F(ApplicationUT, UpdateEventTimeCalculation_SuspendingAndResumingSimulation
 
     NextInstant(relTimeReal);
 
-    TestCreateUpdateEvent(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
+    TestCalculateTimeDiff(relTimeExact, absTimeExact, relTime, absTime, relTimeReal, absTimeReal);
 }

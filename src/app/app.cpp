@@ -62,6 +62,11 @@ template<> CApplication* CSingleton<CApplication>::m_instance = nullptr;
 //! Static buffer for putenv locale
 static char S_LANGUAGE[50] = { 0 };
 
+//! Maximum stable time step
+const float MAX_TIME_STEP = 0.075f;
+
+//! Maximum amount of updates per frame
+const int MAX_UPDATES_PER_FRAME = 30;
 
 //! Interval of timer called to update joystick state
 const int JOYSTICK_TIMER_INTERVAL = 1000/30;
@@ -134,6 +139,9 @@ CApplication::CApplication()
     m_curTimeStamp = GetSystemUtils()->CreateTimeStamp();
     m_lastTimeStamp = GetSystemUtils()->CreateTimeStamp();
 
+    m_updateRemainingTime = 0.0f;
+    m_timeStep = 0.01f;
+
     for (int i = 0; i < PCNT_MAX; ++i)
     {
         m_performanceCounters[i][0] = GetSystemUtils()->CreateTimeStamp();
@@ -197,7 +205,8 @@ ParseArgsStatus CApplication::ParseArguments(int argc, char *argv[])
         OPT_MOD,
         OPT_RESOLUTION,
         OPT_HEADLESS,
-        OPT_DEVICE
+        OPT_DEVICE,
+        OPT_TIMESTEP
     };
 
     option options[] =
@@ -215,6 +224,7 @@ ParseArgsStatus CApplication::ParseArguments(int argc, char *argv[])
         { "resolution", required_argument, nullptr, OPT_RESOLUTION },
         { "headless", no_argument, nullptr, OPT_HEADLESS },
         { "graphics", required_argument, nullptr, OPT_DEVICE },
+        { "timestep", required_argument, nullptr, OPT_TIMESTEP },
         { nullptr, 0, nullptr, 0}
     };
 
@@ -259,6 +269,7 @@ ParseArgsStatus CApplication::ParseArguments(int argc, char *argv[])
                 GetLogger()->Message("  -resolution WxH     set resolution\n");
                 GetLogger()->Message("  -headless           headless mode - disables graphics, sound and user interaction\n");
                 GetLogger()->Message("  -graphics           changes graphics device (defaults to opengl)\n");
+                GetLogger()->Message("  -timestep X         set simulation step (in seconds)\n");
                 return PARSE_ARGS_HELP;
             }
             case OPT_DEBUG:
@@ -372,6 +383,11 @@ ParseArgsStatus CApplication::ParseArguments(int argc, char *argv[])
             case OPT_DEVICE:
             {
                 m_graphics = optarg;
+                break;
+            }
+            case OPT_TIMESTEP:
+            {
+                m_timeStep = StrUtils::FromString<float>(optarg);
                 break;
             }
             default:
@@ -981,15 +997,57 @@ int CApplication::Run()
             StartPerformanceCounter(PCNT_UPDATE_ALL);
 
             // Prepare and process step simulation event
-            event = CreateUpdateEvent();
-            if (event.type != EVENT_NULL && m_controller != nullptr)
+            CalculateTimeDiff();
+            if (!m_simulationSuspended && m_controller != nullptr)
             {
-                LogEvent(event);
-
                 m_sound->FrameMove(m_relTime);
 
                 StartPerformanceCounter(PCNT_UPDATE_GAME);
-                m_controller->ProcessEvent(event);
+                m_updateRemainingTime += m_relTime;
+                int updates = 0;
+
+                float timeStep = m_timeStep*sqrt(m_simulationSpeed);
+                if(timeStep > MAX_TIME_STEP)
+                {
+                    GetLogger()->Warn("Too big time step %f ms, lowering to %f ms\n", timeStep*1000, MAX_TIME_STEP*1000);
+                    timeStep = MAX_TIME_STEP;
+                }
+
+                int plannedUpdates = static_cast<int>(m_updateRemainingTime / timeStep);
+                if(plannedUpdates > MAX_UPDATES_PER_FRAME)
+                {
+                    GetLogger()->Warn("Doing too many updates at once! Limiting to %d. Is your time step too small, or is your computer overloaded? (real time diff = %f, simulated time diff = %f, would do %d updates)\n", MAX_UPDATES_PER_FRAME, timeStep/sqrt(m_simulationSpeed), m_relTime/m_simulationSpeed, m_relTime, plannedUpdates);
+                    timeStep = m_updateRemainingTime/MAX_UPDATES_PER_FRAME;
+                    if(timeStep > MAX_TIME_STEP)
+                    {
+                        GetLogger()->Warn("Too big time step %f ms after adjusting! Lowering to %f ms, you'll notice the game slow down\n", timeStep*1000, MAX_TIME_STEP*1000);
+                        timeStep = MAX_TIME_STEP;
+                        m_updateRemainingTime = timeStep*MAX_UPDATES_PER_FRAME;
+                    }
+                }
+                if(m_updateRemainingTime < timeStep)
+                {
+                    GetLogger()->Trace("No updates this frame! Is your time step too big? (real time diff = %f, simulated time diff = %f)\n", m_relTime/m_simulationSpeed, m_relTime);
+                    timeStep = m_updateRemainingTime;
+                }
+                while(m_updateRemainingTime >= timeStep)
+                {
+                    Event event(EVENT_FRAME);
+                    m_input->EventProcess(event);
+                    event.rTime = timeStep;
+
+                    LogEvent(event);
+                    m_controller->ProcessEvent(event);
+
+                    //m_app->StartPerformanceCounter(PCNT_UPDATE_PARTICLE); //TODO
+                    m_engine->GetParticle()->FrameParticle(timeStep);
+                    //m_app->StopPerformanceCounter(PCNT_UPDATE_PARTICLE); //TODO
+
+                    m_updateRemainingTime -= timeStep;
+                    updates ++;
+                }
+                if(m_updateRemainingTime < 0) m_updateRemainingTime = 0;
+                m_engine->SetStatisticUpdates(updates);
                 StopPerformanceCounter(PCNT_UPDATE_GAME);
 
                 StartPerformanceCounter(PCNT_UPDATE_ENGINE);
@@ -1286,8 +1344,23 @@ bool CApplication::GetSimulationSuspended() const
     return m_simulationSuspended;
 }
 
+float CApplication::GetMaxStableSimulationSpeed() const
+{
+    // m_timeStep*sqrt(speed) = MAX_TIME_STEP
+    // sqrt(speed) = MAX_TIME_STEP / m_timeStep
+    // speed = pow((MAX_TIME_STEP / m_timeStep), 2)
+
+    return pow((MAX_TIME_STEP / m_timeStep), 2);
+}
+
 void CApplication::SetSimulationSpeed(float speed)
 {
+    if(speed > GetMaxStableSimulationSpeed())
+    {
+        GetLogger()->Warn("Speed %fx above maximum stable limit, setting %fx instead\n", speed, GetMaxStableSimulationSpeed());
+        speed = GetMaxStableSimulationSpeed();
+    }
+
     m_simulationSpeed = speed;
 
     GetSystemUtils()->GetCurrentTimeStamp(m_baseTimeStamp);
@@ -1297,11 +1370,8 @@ void CApplication::SetSimulationSpeed(float speed)
     GetLogger()->Info("Simulation speed = %.2f\n", speed);
 }
 
-Event CApplication::CreateUpdateEvent()
+void CApplication::CalculateTimeDiff()
 {
-    if (m_simulationSuspended)
-        return Event(EVENT_NULL);
-
     GetSystemUtils()->CopyTimeStamp(m_lastTimeStamp, m_curTimeStamp);
     GetSystemUtils()->GetCurrentTimeStamp(m_curTimeStamp);
 
@@ -1314,7 +1384,6 @@ Event CApplication::CreateUpdateEvent()
         GetLogger()->Error("Fatal error: got negative system counter difference!\n");
         GetLogger()->Error("This should never happen. Please report this error.\n");
         m_eventQueue->AddEvent(Event(EVENT_SYS_QUIT));
-        return Event(EVENT_NULL);
     }
     else
     {
@@ -1327,12 +1396,6 @@ Event CApplication::CreateUpdateEvent()
         m_exactRelTime = m_simulationSpeed * m_realRelTime;
         m_relTime = (m_simulationSpeed * m_realRelTime) / 1e9f;
     }
-
-    Event frameEvent(EVENT_FRAME);
-    m_input->EventProcess(frameEvent);
-    frameEvent.rTime = m_relTime;
-
-    return frameEvent;
 }
 
 float CApplication::GetSimulationSpeed() const

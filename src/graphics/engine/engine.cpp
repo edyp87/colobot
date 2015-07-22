@@ -440,10 +440,6 @@ void CEngine::FrameUpdate()
 
     m_lightMan->UpdateProgression(rTime);
 
-    m_app->StartPerformanceCounter(PCNT_UPDATE_PARTICLE);
-    m_particle->FrameParticle(rTime);
-    m_app->StopPerformanceCounter(PCNT_UPDATE_PARTICLE);
-
     ComputeDistance();
     UpdateGeometry();
     UpdateStaticBuffers();
@@ -563,6 +559,11 @@ int CEngine::GetStatisticTriangle()
 void CEngine::SetStatisticPos(Math::Vector pos)
 {
     m_statisticPos = pos;
+}
+
+void CEngine::SetStatisticUpdates(int updates)
+{
+    m_statisticUpdates = updates;
 }
 
 void CEngine::SetTimerDisplay(const std::string& text)
@@ -4811,9 +4812,9 @@ void CEngine::DrawStats()
 
     VertexCol vertex[4] =
     {
-        VertexCol(Math::Vector(pos.x        , pos.y - 21 * height, 0.0f), black),
+        VertexCol(Math::Vector(pos.x        , pos.y - 22 * height, 0.0f), black),
         VertexCol(Math::Vector(pos.x        , pos.y + height, 0.0f), black),
-        VertexCol(Math::Vector(pos.x + width, pos.y - 21 * height, 0.0f), black),
+        VertexCol(Math::Vector(pos.x + width, pos.y - 22 * height, 0.0f), black),
         VertexCol(Math::Vector(pos.x + width, pos.y + height, 0.0f), black)
     };
 
@@ -4933,6 +4934,12 @@ void CEngine::DrawStats()
     pos.y -= height;
 
     m_text->DrawText(m_fpsText, FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
+
+    pos.y -= height;
+
+    str.str("");
+    str << "Updates: " << m_statisticUpdates;
+    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
 
 
     pos.y -= height;

@@ -766,6 +766,8 @@ public:
     //! Sets the coordinates to display in stats window
     void            SetStatisticPos(Math::Vector pos);
 
+    void            SetStatisticUpdates(int updates);
+
     //! Sets text to display as mission timer
     void            SetTimerDisplay(const std::string& text);
 
@@ -1429,6 +1431,7 @@ protected:
     Color           m_waterAddColor;
     int             m_statisticTriangle;
     Math::Vector    m_statisticPos;
+    int             m_statisticUpdates;
     bool            m_updateGeometry;
     bool            m_updateStaticBuffers;
     int             m_alphaMode;
