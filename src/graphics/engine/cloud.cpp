@@ -214,9 +214,6 @@ void CCloud::Create(const std::string& fileName,
     m_lastTest = 0.0f;
     m_fileName = fileName;
 
-    if (! m_fileName.empty())
-        m_engine->LoadTexture(m_fileName);
-
     if (m_terrain == nullptr)
         m_terrain = CRobotMain::GetInstancePointer()->GetTerrain();
 

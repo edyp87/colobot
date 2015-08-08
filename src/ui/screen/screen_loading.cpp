@@ -95,7 +95,7 @@ void CScreenLoading::CreateInterface()
     SetBackground("textures/interface/interface.png");
 
     m_engine->SetDrawWorld(false);
-    m_app->Render();
+    m_app->RenderNextFrame();
 
     m_visible = true;
 }
@@ -152,7 +152,7 @@ void CScreenLoading::SetProgress(float progress, const std::string& text, const 
     {
         SetBackground("textures/interface/interface.png");
         m_engine->SetBackForce(true);
-        m_app->Render();
+        m_app->RenderNextFrame();
     }
 
     m_lastProgress = progress;

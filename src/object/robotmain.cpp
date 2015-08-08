@@ -258,6 +258,8 @@ CRobotMain::CRobotMain()
     m_researchEnable = 0;
     g_unit = UNIT;
 
+    m_texturesNeedUpdate = false;
+
     for (int i = 0; i < MAXSHOWLIMIT; i++)
     {
         m_showLimit[i].used = false;
@@ -619,6 +621,35 @@ void CRobotMain::ChangePhase(Phase phase)
     }
 
     m_engine->LoadAllTextures();
+}
+
+void CRobotMain::RenderUpdate()
+{
+    if (m_texturesNeedUpdate)
+    {
+        ChangeColor();
+        UpdateMap();
+        m_texturesNeedUpdate = false;
+    }
+
+    if (!m_shotName.empty())
+    {
+        ShowSaveIndicator(false); // force hide for screenshot
+        MouseMode oldMouseMode = m_app->GetMouseMode();
+        m_app->SetMouseMode(MOUSE_NONE); // disable the mouse
+        m_displayText->HideText(true); // hide
+        m_engine->SetScreenshotMode(true);
+
+        m_engine->Render(); // update (but don't show, we're not swapping buffers here!)
+        m_engine->WriteScreenShot(m_shotName);
+        m_shotSaving++;
+
+        m_engine->SetScreenshotMode(false);
+        m_displayText->HideText(false);
+        m_app->SetMouseMode(oldMouseMode);
+
+        m_shotName = "";
+    }
 }
 
 //! Processes an event
@@ -3445,9 +3476,6 @@ void CRobotMain::CreateScene(bool soluce, bool fixScene, bool resetObject)
                 InitEye();
                 SetMovieLock(false);
 
-                if(!resetObject)
-                    ChangeColor();  // changes the colors of texture
-
                 if (!m_sceneReadPath.empty())  // loading file ?
                 {
                     m_ui->GetLoadingScreen()->SetProgress(0.25f, RT_LOADING_OBJECTS_SAVED);
@@ -3951,7 +3979,7 @@ void CRobotMain::CreateScene(bool soluce, bool fixScene, bool resetObject)
         }
 
         m_map->ShowMap(m_mapShow);
-        m_map->UpdateMap();
+        m_texturesNeedUpdate = true;
         // TODO: m_engine->TimeInit(); ??
         m_input->ResetKeyStates();
         m_time = 0.0f;
@@ -5030,7 +5058,7 @@ bool CRobotMain::IOWriteScene(std::string filename, std::string filecbot, std::s
 {
     // Render the indicator to show that we are working
     ShowSaveIndicator(true);
-    m_app->Render(); // update
+    m_app->RenderNextFrame(); // update
 
     CLevelParser levelParser(filename);
     CLevelParserLineUPtr line;
@@ -5153,19 +5181,7 @@ bool CRobotMain::IOWriteScene(std::string filename, std::string filecbot, std::s
     CBotClass::SaveStaticState(file);
     fClose(file);
 
-    ShowSaveIndicator(false); // force hide for screenshot
-    MouseMode oldMouseMode = m_app->GetMouseMode();
-    m_app->SetMouseMode(MOUSE_NONE); // disable the mouse
-    m_displayText->HideText(true); // hide
-    m_engine->SetScreenshotMode(true);
-
-    m_engine->Render(); // update (but don't show, we're not swapping buffers here!)
-    m_engine->WriteScreenShot(CResourceManager::GetSaveLocation() + "/" + filescreenshot); //TODO: Use PHYSFS?
-    m_shotSaving++;
-
-    m_engine->SetScreenshotMode(false);
-    m_displayText->HideText(false);
-    m_app->SetMouseMode(oldMouseMode);
+    m_shotName = CResourceManager::GetSaveLocation() + "/" + filescreenshot; //TODO: Use PHYSFS?
 
     return true;
 }

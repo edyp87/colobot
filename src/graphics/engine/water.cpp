@@ -478,9 +478,6 @@ void CWater::Create(WaterType type1, WaterType type2, const std::string& fileNam
 
     VaporFlush();
 
-    if (! m_fileName.empty())
-        m_engine->LoadTexture(m_fileName);
-
     if (m_terrain == nullptr)
         m_terrain = CRobotMain::GetInstancePointer()->GetTerrain();
 

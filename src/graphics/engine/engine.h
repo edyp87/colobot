@@ -684,7 +684,7 @@ public:
 
     //! Enables/disables rendering
     void            SetRenderEnable(bool enable);
-    
+
     //! Management of "screenshot mode" (disables interface particle rendering)
     //@{
     void            SetScreenshotMode(bool screenshotMode);
@@ -716,6 +716,9 @@ public:
 
     //! Sets the coordinates to display in stats window
     void            SetStatisticPos(Math::Vector pos);
+
+    //! Sets the time step to display in stats window
+    void            SetStatisticTimeStep(float timeStep);
 
     //! Sets text to display as mission timer
     void            SetTimerDisplay(const std::string& text);
@@ -906,8 +909,8 @@ public:
     Texture         LoadTexture(const std::string& name, CImage* image);
     //! Loads texture, creating it with given params if not already present
     Texture         LoadTexture(const std::string& name, const TextureCreateParams& params);
-    //! Loads all necessary textures
-    bool            LoadAllTextures();
+    //! Loads all necessary textures on next frame render
+    void            LoadAllTextures();
 
     //! Changes colors in a texture
     //@{
@@ -1210,6 +1213,9 @@ public:
     void            ApplyChange();
 
 protected:
+    //! Loads all necessary textures now (to be called from render thread)
+    bool            LoadAllTexturesNow();
+
     //! Prepares the interface for 3D scene
     void        Draw3DScene();
     //! Renders shadow map
@@ -1325,10 +1331,16 @@ protected:
     SystemTimeStamp* m_currentFrameTime;
     int             m_fpsCounter;
     float           m_fps;
+    std::string     m_fpsText;
+
+    SystemTimeStamp* m_lastTickTime;
+    SystemTimeStamp* m_currentTickTime;
+    int             m_tpsCounter;
+    float           m_tps;
+    std::string     m_tpsText;
 
     //! Whether to show stats (FPS, etc)
     bool            m_showStats;
-    std::string     m_fpsText;
     //! Rendering enabled?
     bool            m_render;
 
@@ -1387,6 +1399,7 @@ protected:
     Color           m_waterAddColor;
     int             m_statisticTriangle;
     Math::Vector    m_statisticPos;
+    float           m_statisticTimeStep;
     bool            m_updateGeometry;
     bool            m_updateStaticBuffers;
     bool            m_groundSpotVisible;
@@ -1403,11 +1416,13 @@ protected:
     Color           m_backgroundColorDown;
     Color           m_backgroundCloudUp;
     Color           m_backgroundCloudDown;
+    std::string     m_lastBackgroundName;
     bool            m_overFront;
     Color           m_overColor;
     int             m_overMode;
     std::string     m_foregroundName;
     Texture         m_foregroundTex;
+    std::string     m_lastForegroundName;
     bool            m_drawWorld;
     bool            m_drawFront;
     float           m_particleDensity;
@@ -1425,6 +1440,9 @@ protected:
     bool            m_editIndentMode;
     int             m_editIndentValue;
     float           m_tracePrecision;
+
+    bool            m_texturesNeedClearing;
+    bool            m_texturesNeedLoading;
 
     Texture         m_shadowMap;
 

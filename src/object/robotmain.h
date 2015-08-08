@@ -161,6 +161,8 @@ public:
 
     void        ChangePhase(Phase phase);
     bool        ProcessEvent(Event &event);
+    //! Execute any pre-render hooks on the render thread
+    void        RenderUpdate();
 
     bool        CreateShortcuts();
     void        ScenePerso();
@@ -589,6 +591,9 @@ protected:
     float           m_autosaveLast;
 
     int             m_shotSaving;
+    std::string     m_shotName;
+
+    bool            m_texturesNeedUpdate;
 
     std::deque<CObject*> m_selectionHistory;
 };

@@ -28,6 +28,7 @@
 #include "common/key.h"
 #include "common/logger.h"
 #include "common/make_unique.h"
+#include "common/perf_counters.h"
 
 #include "common/thread/resource_owning_thread.h"
 
@@ -55,7 +56,6 @@
 #include "ui/controls/interface.h"
 
 #include <iomanip>
-#include <SDL_thread.h>
 
 template<> Gfx::CEngine* CSingleton<Gfx::CEngine>::m_instance = nullptr;
 
@@ -183,8 +183,14 @@ CEngine::CEngine(CApplication *app, CSystemUtils* systemUtils)
     m_mouseType    = ENG_MOUSE_NORM;
 
     m_fpsCounter = 0;
+    m_fps = 0.0f;
     m_lastFrameTime = m_systemUtils->CreateTimeStamp();
     m_currentFrameTime = m_systemUtils->CreateTimeStamp();
+
+    m_tpsCounter = 0;
+    m_tps = 0.0f;
+    m_lastTickTime = m_systemUtils->CreateTimeStamp();
+    m_currentTickTime = m_systemUtils->CreateTimeStamp();
 
     m_shadowColor = 0.5f;
 
@@ -203,8 +209,10 @@ CEngine::CEngine(CApplication *app, CSystemUtils* systemUtils)
 
     m_lastState = -1;
     m_statisticTriangle = 0;
-    m_fps = 0.0f;
     m_firstGroundSpot = false;
+
+    m_texturesNeedClearing = false;
+    m_texturesNeedLoading = false;
 }
 
 CEngine::~CEngine()
@@ -226,6 +234,11 @@ CEngine::~CEngine()
     m_lastFrameTime = nullptr;
     m_systemUtils->DestroyTimeStamp(m_currentFrameTime);
     m_currentFrameTime = nullptr;
+
+    m_systemUtils->DestroyTimeStamp(m_lastTickTime);
+    m_lastTickTime = nullptr;
+    m_systemUtils->DestroyTimeStamp(m_currentTickTime);
+    m_currentTickTime = nullptr;
 }
 
 void CEngine::SetDevice(CDevice *device)
@@ -387,25 +400,7 @@ void CEngine::ResetAfterDeviceChanged()
     m_size = m_app->GetVideoConfig().size;
     m_mouseSize = Math::Point(0.04f, 0.04f * (m_size.x / m_size.y));
 
-    if (m_shadowMap.id != 0)
-    {
-        if (m_offscreenShadowRendering)
-            m_device->DeleteFramebuffer("shadow");
-        else
-            m_device->DestroyTexture(m_shadowMap);
-
-        m_shadowMap = Texture();
-    }
-
-    m_text->FlushCache();
-
-    FlushTextureCache();
-
-    // This prevents the "unable to open file shadow[00..15].png" messages
-    UpdateGroundSpotTextures();
-
-    CRobotMain::GetInstancePointer()->ResetAfterDeviceChanged();
-
+    m_texturesNeedClearing = true;
     LoadAllTextures();
 }
 
@@ -440,25 +435,25 @@ bool CEngine::ProcessEvent(const Event &event)
 
 void CEngine::FrameUpdate()
 {
-    m_fpsCounter++;
+    m_tpsCounter++;
 
-    m_systemUtils->GetCurrentTimeStamp(m_currentFrameTime);
-    float diff = m_systemUtils->TimeStampDiff(m_lastFrameTime, m_currentFrameTime, STU_SEC);
+    m_systemUtils->GetCurrentTimeStamp(m_currentTickTime);
+    float diff = m_systemUtils->TimeStampDiff(m_lastTickTime, m_currentTickTime, STU_SEC);
     if (diff > 1.0f)
     {
-        m_systemUtils->CopyTimeStamp(m_lastFrameTime, m_currentFrameTime);
+        m_systemUtils->CopyTimeStamp(m_lastTickTime, m_currentTickTime);
 
-        m_fps = m_fpsCounter / diff;
-        m_fpsCounter = 0;
+        m_tps = m_tpsCounter / diff;
+        m_tpsCounter = 0;
 
         if (m_showStats)
         {
             std::stringstream str;
-            str << "FPS: ";
+            str << "TPS: ";
             str.precision(2);
             str.setf(std::ios_base::fixed);
-            str << m_fps;
-            m_fpsText = str.str();
+            str << m_tps;
+            m_tpsText = str.str();
         }
     }
 
@@ -466,9 +461,9 @@ void CEngine::FrameUpdate()
 
     m_lightMan->UpdateProgression(rTime);
 
-    m_app->StartPerformanceCounter(PCNT_UPDATE_PARTICLE);
+    m_app->GetPerformanceCounters()->StartCounter(PCNT_UPDATE_PARTICLE);
     m_particle->FrameParticle(rTime);
-    m_app->StopPerformanceCounter(PCNT_UPDATE_PARTICLE);
+    m_app->GetPerformanceCounters()->StopCounter(PCNT_UPDATE_PARTICLE);
 
     ComputeDistance();
     UpdateGeometry();
@@ -607,6 +602,11 @@ int CEngine::GetStatisticTriangle()
 void CEngine::SetStatisticPos(Math::Vector pos)
 {
     m_statisticPos = pos;
+}
+
+void CEngine::SetStatisticTimeStep(float timeStep)
+{
+    m_statisticTimeStep = timeStep;
 }
 
 void CEngine::SetTimerDisplay(const std::string& text)
@@ -1160,12 +1160,6 @@ void CEngine::ChangeSecondTexture(int objRank, const std::string& tex2Name)
         EngineBaseObjTexTier& newP2 = AddLevel2(p1, tex1Name, tex2Name);
         newP2.next.insert(newP2.next.end(), p1.next[l2].next.begin(), p1.next[l2].next.end());
         p1.next[l2].next.clear();
-
-        if (!newP2.tex1.Valid() && !newP2.tex1Name.empty())
-            newP2.tex1 = LoadTexture("textures/"+newP2.tex1Name);
-
-        if (!newP2.tex2.Valid() && !newP2.tex2Name.empty())
-            newP2.tex2 = LoadTexture("textures/"+newP2.tex2Name);
     }
 }
 
@@ -2287,7 +2281,12 @@ Texture CEngine::LoadTexture(const std::string& name, const TextureCreateParams&
     return CreateTexture(name, params);
 }
 
-bool CEngine::LoadAllTextures()
+void CEngine::LoadAllTextures()
+{
+    m_texturesNeedLoading = true;
+}
+
+bool CEngine::LoadAllTexturesNow()
 {
     m_miceTexture = LoadTexture("textures/interface/mouse.png");
     LoadTexture("textures/interface/button1.png");
@@ -2298,6 +2297,15 @@ bool CEngine::LoadAllTextures()
     LoadTexture("textures/effect02.png");
     LoadTexture("textures/effect03.png");
 
+    if (m_lastBackgroundName != m_backgroundName)
+    {
+        if (m_backgroundTex.Valid())
+        {
+            DeleteTexture(m_backgroundTex);
+            m_backgroundTex.SetInvalid();
+        }
+    }
+
     if (! m_backgroundName.empty())
     {
         TextureCreateParams params = m_defaultTexParams;
@@ -2306,6 +2314,15 @@ bool CEngine::LoadAllTextures()
     }
     else
         m_backgroundTex.SetInvalid();
+
+    if (m_lastBackgroundName != m_backgroundName)
+    {
+        if (m_foregroundTex.Valid())
+        {
+            DeleteTexture(m_foregroundTex);
+            m_foregroundTex.SetInvalid();
+        }
+    }
 
     if (! m_foregroundName.empty())
         m_foregroundTex = LoadTexture(m_foregroundName);
@@ -2783,12 +2800,7 @@ float CEngine::GetFogStart(int rank)
 void CEngine::SetBackground(const std::string& name, Color up, Color down,
                             Color cloudUp, Color cloudDown, bool full, bool scale)
 {
-    if (m_backgroundTex.Valid())
-    {
-        DeleteTexture(m_backgroundTex);
-        m_backgroundTex.SetInvalid();
-    }
-
+    m_lastBackgroundName = m_backgroundName;
     m_backgroundName      = name;
     m_backgroundColorUp   = up;
     m_backgroundColorDown = down;
@@ -2796,13 +2808,6 @@ void CEngine::SetBackground(const std::string& name, Color up, Color down,
     m_backgroundCloudDown = cloudDown;
     m_backgroundFull      = full;
     m_backgroundScale     = scale;
-
-    if (! m_backgroundName.empty())
-    {
-        TextureCreateParams params = m_defaultTexParams;
-        params.padToNearestPowerOfTwo = true;
-        m_backgroundTex = LoadTexture(m_backgroundName, params);
-    }
 }
 
 void CEngine::GetBackground(std::string& name, Color& up, Color& down,
@@ -2819,16 +2824,8 @@ void CEngine::GetBackground(std::string& name, Color& up, Color& down,
 
 void CEngine::SetForegroundName(const std::string& name)
 {
-    if (m_foregroundTex.Valid())
-    {
-        DeleteTexture(m_foregroundTex);
-        m_foregroundTex.SetInvalid();
-    }
-
+    m_lastForegroundName = m_foregroundName;
     m_foregroundName = name;
-
-    if (! m_foregroundName.empty())
-        m_foregroundTex = LoadTexture(m_foregroundName);
 }
 
 void CEngine::SetOverFront(bool front)
@@ -3190,6 +3187,58 @@ void CEngine::Render()
     if (! m_render)
         return;
 
+    m_fpsCounter++;
+
+    m_systemUtils->GetCurrentTimeStamp(m_currentFrameTime);
+    float diff = m_systemUtils->TimeStampDiff(m_lastFrameTime, m_currentFrameTime, STU_SEC);
+    if (diff > 1.0f)
+    {
+        m_systemUtils->CopyTimeStamp(m_lastFrameTime, m_currentFrameTime);
+
+        m_fps = m_fpsCounter / diff;
+        m_fpsCounter = 0;
+
+        if (m_showStats)
+        {
+            std::stringstream str;
+            str << "FPS: ";
+            str.precision(2);
+            str.setf(std::ios_base::fixed);
+            str << m_fps;
+            m_fpsText = str.str();
+        }
+    }
+
+    if (m_texturesNeedClearing)
+    {
+        if (m_shadowMap.id != 0)
+        {
+            if (m_offscreenShadowRendering)
+                m_device->DeleteFramebuffer("shadow");
+            else
+                m_device->DestroyTexture(m_shadowMap);
+
+            m_shadowMap = Texture();
+        }
+
+        m_text->FlushCache();
+
+        FlushTextureCache();
+
+        // This prevents the "unable to open file shadow[00..15].png" messages
+        UpdateGroundSpotTextures();
+
+        CRobotMain::GetInstancePointer()->ResetAfterDeviceChanged();
+
+        m_texturesNeedClearing = false;
+    }
+
+    if (m_texturesNeedLoading)
+    {
+        LoadAllTexturesNow();
+        m_texturesNeedLoading = false;
+    }
+
     m_statisticTriangle = 0;
     m_lastState = -1;
     m_lastColor = Color(-1.0f);
@@ -3222,9 +3271,9 @@ void CEngine::Render()
 
     UseMSAA(false);
 
-    m_app->StartPerformanceCounter(PCNT_RENDER_INTERFACE);
+    m_app->GetPerformanceCounters()->StartCounter(PCNT_RENDER_INTERFACE);
     DrawInterface();
-    m_app->StopPerformanceCounter(PCNT_RENDER_INTERFACE);
+    m_app->GetPerformanceCounters()->StopCounter(PCNT_RENDER_INTERFACE);
 
     // End the scene
     m_device->EndScene();
@@ -3256,7 +3305,7 @@ void CEngine::Draw3DScene()
 
     if (m_waterMode) m_water->DrawBack();  // draws water background
 
-    m_app->StartPerformanceCounter(PCNT_RENDER_TERRAIN);
+    m_app->GetPerformanceCounters()->StartCounter(PCNT_RENDER_TERRAIN);
 
     // Draw terrain
 
@@ -3317,11 +3366,11 @@ void CEngine::Draw3DScene()
         DrawShadow();
 
 
-    m_app->StopPerformanceCounter(PCNT_RENDER_TERRAIN);
+    m_app->GetPerformanceCounters()->StopCounter(PCNT_RENDER_TERRAIN);
 
     // Draw other objects
 
-    m_app->StartPerformanceCounter(PCNT_RENDER_OBJECTS);
+    m_app->GetPerformanceCounters()->StartCounter(PCNT_RENDER_OBJECTS);
 
     bool transparent = false;
 
@@ -3438,7 +3487,7 @@ void CEngine::Draw3DScene()
         }
     }
 
-    m_app->StopPerformanceCounter(PCNT_RENDER_OBJECTS);
+    m_app->GetPerformanceCounters()->StopCounter(PCNT_RENDER_OBJECTS);
 
     m_lightMan->UpdateDeviceLights(ENG_OBJTYPE_TERRAIN);
 
@@ -3453,16 +3502,16 @@ void CEngine::Draw3DScene()
 
     if (m_waterMode)
     {
-        m_app->StartPerformanceCounter(PCNT_RENDER_WATER);
+        m_app->GetPerformanceCounters()->StartCounter(PCNT_RENDER_WATER);
         m_water->DrawSurf(); // draws water surface
-        m_app->StopPerformanceCounter(PCNT_RENDER_WATER);
+        m_app->GetPerformanceCounters()->StopCounter(PCNT_RENDER_WATER);
     }
 
     m_device->SetRenderState(RENDER_STATE_LIGHTING, false);
 
-    m_app->StartPerformanceCounter(PCNT_RENDER_PARTICLE);
+    m_app->GetPerformanceCounters()->StartCounter(PCNT_RENDER_PARTICLE);
     m_particle->DrawParticle(SH_WORLD); // draws the particles of the 3D world
-    m_app->StopPerformanceCounter(PCNT_RENDER_PARTICLE);
+    m_app->GetPerformanceCounters()->StopCounter(PCNT_RENDER_PARTICLE);
 
     m_device->SetRenderState(RENDER_STATE_LIGHTING, true);
 
@@ -3481,7 +3530,7 @@ void CEngine::RenderShadowMap()
 
     if (!m_shadowMapping) return;
 
-    m_app->StartPerformanceCounter(PCNT_RENDER_SHADOW_MAP);
+    m_app->GetPerformanceCounters()->StartCounter(PCNT_RENDER_SHADOW_MAP);
 
     // If no shadow map texture exists, create it
     if (m_shadowMap.id == 0)
@@ -3649,7 +3698,7 @@ void CEngine::RenderShadowMap()
     m_device->SetColorMask(true, true, true, true);
     m_device->Clear();
 
-    m_app->StopPerformanceCounter(PCNT_RENDER_SHADOW_MAP);
+    m_app->GetPerformanceCounters()->StopCounter(PCNT_RENDER_SHADOW_MAP);
 
     m_device->SetRenderState(RENDER_STATE_DEPTH_TEST, false);
 }
@@ -4853,8 +4902,9 @@ void CEngine::DrawStats()
 
     float height = m_text->GetAscent(FONT_COLOBOT, 13.0f);
     float width = 0.25f;
+    const int TOTAL_LINES = 25;
 
-    Math::Point pos(0.04f, 0.04f + 20 * height);
+    Math::Point pos(0.04f, 0.04f + TOTAL_LINES * height);
 
     SetState(ENG_RSTATE_OPAQUE_COLOR);
 
@@ -4862,9 +4912,9 @@ void CEngine::DrawStats()
 
     VertexCol vertex[4] =
     {
-        VertexCol(Math::Vector(pos.x        , pos.y - 21 * height, 0.0f), black),
+        VertexCol(Math::Vector(pos.x        , pos.y - (TOTAL_LINES-1) * height, 0.0f), black),
         VertexCol(Math::Vector(pos.x        , pos.y + height, 0.0f), black),
-        VertexCol(Math::Vector(pos.x + width, pos.y - 21 * height, 0.0f), black),
+        VertexCol(Math::Vector(pos.x + width, pos.y - (TOTAL_LINES-1) * height, 0.0f), black),
         VertexCol(Math::Vector(pos.x + width, pos.y + height, 0.0f), black)
     };
 
@@ -4874,129 +4924,54 @@ void CEngine::DrawStats()
 
     std::stringstream str;
 
-    str.str("");
-    str << "Event processing: " << std::fixed << std::setprecision(2) << m_app->GetPerformanceCounterData(PCNT_EVENT_PROCESSING);
-    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
+    auto showCounter = [&](const std::string& text, PerformanceCounter counter)
+    {
+        str.str("");
+        str << text << ": " << std::fixed << std::setprecision(2) << m_app->GetPerformanceCounters()->GetCounterData(counter) << "ms";
+        m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
+        pos.y -= height;
+    };
 
+    showCounter("Event recieving", PCNT_EVENT_RECIEVING);
+    showCounter("Pre-render update", PCNT_PRERENDER);
+    showCounter("Rendering particles", PCNT_RENDER_PARTICLE);
+    showCounter("Rendering water", PCNT_RENDER_WATER);
+    showCounter("Rendering terrain", PCNT_RENDER_TERRAIN);
+    showCounter("Rendering objects", PCNT_RENDER_OBJECTS);
+    showCounter("Rendering interface", PCNT_RENDER_INTERFACE);
+    showCounter("Rendering shadow map", PCNT_RENDER_SHADOW_MAP);
+    showCounter("Rendering TOTAL", PCNT_RENDER_ALL);
+    showCounter("MAIN THREAD TOTAL", PCNT_ALL_MAIN);
+    pos.y -= height;
+    showCounter("Event processing", PCNT_EVENT_PROCESSING);
+    showCounter("Update engine", PCNT_UPDATE_ENGINE);
+    showCounter("Update particles", PCNT_UPDATE_PARTICLE);
+    showCounter("Update game", PCNT_UPDATE_GAME);
+    showCounter("Update TOTAL", PCNT_UPDATE_ALL);
+    showCounter("UPDATE THREAD TOTAL", PCNT_ALL_UPDATE);
     pos.y -= height;
     pos.y -= height;
-
-
-    str.str("");
-    str << "Frame update: " << std::fixed << std::setprecision(2) << m_app->GetPerformanceCounterData(PCNT_UPDATE_ALL);
-    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
-    pos.y -= height;
-
-    str.str("");
-    str << "Engine update: " << std::fixed << std::setprecision(2) << m_app->GetPerformanceCounterData(PCNT_UPDATE_ENGINE);
-    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
-    pos.y -= height;
-
-    str.str("");
-    str << "Particle update: " << std::fixed << std::setprecision(2) << m_app->GetPerformanceCounterData(PCNT_UPDATE_PARTICLE);
-    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
-    pos.y -= height;
-
-    str.str("");
-    str << "Game update: " << std::fixed << std::setprecision(2) << m_app->GetPerformanceCounterData(PCNT_UPDATE_GAME);
-    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
-    pos.y -= height;
-
-    float otherUpdate = Math::Max(0.0f, m_app->GetPerformanceCounterData(PCNT_UPDATE_ALL) -
-                                       m_app->GetPerformanceCounterData(PCNT_UPDATE_ENGINE) -
-                                       m_app->GetPerformanceCounterData(PCNT_UPDATE_PARTICLE) -
-                                       m_app->GetPerformanceCounterData(PCNT_UPDATE_GAME));
-
-    str.str("");
-    str << "Other update: " << std::fixed << std::setprecision(2) << otherUpdate;
-    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
-    pos.y -= height;
-    pos.y -= height;
-
-
-    str.str("");
-    str << "Frame render: " << std::fixed << std::setprecision(2) << m_app->GetPerformanceCounterData(PCNT_RENDER_ALL);
-    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
-    pos.y -= height;
-
-    str.str("");
-    str << "Particle render: " << std::fixed << std::setprecision(2) << m_app->GetPerformanceCounterData(PCNT_RENDER_PARTICLE);
-    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
-    pos.y -= height;
-
-    str.str("");
-    str << "Water render: " << std::fixed << std::setprecision(2) << m_app->GetPerformanceCounterData(PCNT_RENDER_WATER);
-    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
-    pos.y -= height;
-
-    str.str("");
-    str << "Terrain render: " << std::fixed << std::setprecision(2) << m_app->GetPerformanceCounterData(PCNT_RENDER_TERRAIN);
-    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
-    pos.y -= height;
-
-    str.str("");
-    str << "Objects render: " << std::fixed << std::setprecision(2) << m_app->GetPerformanceCounterData(PCNT_RENDER_OBJECTS);
-    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
-    pos.y -= height;
-
-    str.str("");
-    str << "UI render: " << std::fixed << std::setprecision(2) << m_app->GetPerformanceCounterData(PCNT_RENDER_INTERFACE);
-    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
-    pos.y -= height;
-
-    str.str("");
-    str << "Shadow map render: " << std::fixed << std::setprecision(2) << m_app->GetPerformanceCounterData(PCNT_RENDER_SHADOW_MAP);
-    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
-    pos.y -= height;
-
-    float otherRender = m_app->GetPerformanceCounterData(PCNT_RENDER_ALL) -
-                        m_app->GetPerformanceCounterData(PCNT_RENDER_PARTICLE) -
-                        m_app->GetPerformanceCounterData(PCNT_RENDER_WATER) -
-                        m_app->GetPerformanceCounterData(PCNT_RENDER_TERRAIN) -
-                        m_app->GetPerformanceCounterData(PCNT_RENDER_OBJECTS) -
-                        m_app->GetPerformanceCounterData(PCNT_RENDER_INTERFACE) -
-                        m_app->GetPerformanceCounterData(PCNT_RENDER_SHADOW_MAP);
-
-    str.str("");
-    str << "Other render: " << std::fixed << std::setprecision(2) << otherRender;
-    m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
-    pos.y -= height;
-    pos.y -= height;
-
 
     str.str("");
     str << "Triangles: " << m_statisticTriangle;
     m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
     pos.y -= height;
 
     m_text->DrawText(m_fpsText, FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
-
-
     pos.y -= height;
+
+    m_text->DrawText(m_tpsText, FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
     pos.y -= height;
 
     str.str("");
-    str << "Position x: " << std::fixed << std::setprecision(2) << m_statisticPos.x/g_unit;
+    str << "Time step: " << std::fixed << std::setprecision(2) << m_statisticTimeStep << " ms";
     m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
+    pos.y -= height;
 
     pos.y -= height;
 
     str.str("");
-    str << "Position y: " << std::fixed << std::setprecision(2) << m_statisticPos.z/g_unit;
+    str << "Position: " << std::fixed << std::setprecision(2) << m_statisticPos.x/g_unit << "; " << m_statisticPos.z/g_unit;
     m_text->DrawText(str.str(), FONT_COLOBOT, 12.0f, pos, 1.0f, TEXT_ALIGN_LEFT, 0, Color(1.0f, 1.0f, 1.0f, 1.0f));
 }
 

@@ -30,9 +30,14 @@
 #include "common/logger.h"
 #include "common/make_unique.h"
 #include "common/pathman.h"
+#include "common/perf_counters.h"
 #include "common/stringutils.h"
 
 #include "common/resources/resourcemanager.h"
+
+#include "common/thread/sdl_mutex_wrapper.h"
+#include "common/thread/sdl_thread_wrapper.h"
+#include "common/thread/signal.h"
 
 #include "graphics/core/nulldevice.h"
 
@@ -105,9 +110,7 @@ CApplication::CApplication(CSystemUtils* systemUtils)
       m_private(MakeUnique<ApplicationPrivate>()),
       m_configFile(MakeUnique<CConfigFile>()),
       m_input(MakeUnique<CInput>()),
-      m_pathManager(MakeUnique<CPathManager>(systemUtils)),
-      m_performanceCounters(),
-      m_performanceCountersData()
+      m_pathManager(MakeUnique<CPathManager>(systemUtils))
 {
     m_exitCode      = 0;
     m_active        = false;
@@ -135,12 +138,6 @@ CApplication::CApplication(CSystemUtils* systemUtils)
     m_curTimeStamp = m_systemUtils->CreateTimeStamp();
     m_lastTimeStamp = m_systemUtils->CreateTimeStamp();
 
-    for (int i = 0; i < PCNT_MAX; ++i)
-    {
-        m_performanceCounters[i][0] = m_systemUtils->CreateTimeStamp();
-        m_performanceCounters[i][1] = m_systemUtils->CreateTimeStamp();
-    }
-
     m_joystickEnabled = false;
 
     m_mouseMode = MOUSE_SYSTEM;
@@ -164,12 +161,6 @@ CApplication::~CApplication()
     m_systemUtils->DestroyTimeStamp(m_baseTimeStamp);
     m_systemUtils->DestroyTimeStamp(m_curTimeStamp);
     m_systemUtils->DestroyTimeStamp(m_lastTimeStamp);
-
-    for (int i = 0; i < PCNT_MAX; ++i)
-    {
-        m_systemUtils->DestroyTimeStamp(m_performanceCounters[i][0]);
-        m_systemUtils->DestroyTimeStamp(m_performanceCounters[i][1]);
-    }
 
     m_joystickEnabled = false;
 
@@ -626,6 +617,7 @@ bool CApplication::Create()
     }
 
     m_eventQueue = MakeUnique<CEventQueue>();
+    m_performanceCounters = MakeUnique<CPerformanceCounters>(m_systemUtils);
 
     // Create the robot application.
     m_controller = MakeUnique<CController>(this, !defaultValues);
@@ -892,15 +884,34 @@ int CApplication::Run()
 
     MoveMouse(Math::Point(0.5f, 0.5f)); // center mouse on start
 
-    while (true)
-    {
-        ResetPerformanceCounters();
+    // Start update thread
+    m_updateMutex = MakeUnique<CSDLMutexWrapper>();
+    m_startFrameSignal = MakeUnique<CSignal>(m_updateMutex.get());
+    m_finishedFrameSignal = MakeUnique<CSignal>(m_updateMutex.get());
+    std::unique_ptr<CSDLThreadWrapper> updateThread = MakeUnique<CSDLThreadWrapper>([&]() {
+        RunUpdateThread();
+    });
+    updateThread->Start();
 
-        if (m_active)
-        {
-            StartPerformanceCounter(PCNT_ALL);
-            StartPerformanceCounter(PCNT_EVENT_PROCESSING);
-        }
+    m_running = true;
+    while (m_running)
+    {
+        SDL_LockMutex(**m_updateMutex);
+        m_startFrameSignal->Wait();
+
+        m_performanceCounters->ResetCounter(PCNT_EVENT_RECIEVING);
+        m_performanceCounters->ResetCounter(PCNT_PRERENDER);
+        m_performanceCounters->ResetCounter(PCNT_RENDER_ALL);
+        m_performanceCounters->ResetCounter(PCNT_RENDER_PARTICLE);
+        m_performanceCounters->ResetCounter(PCNT_RENDER_WATER);
+        m_performanceCounters->ResetCounter(PCNT_RENDER_TERRAIN);
+        m_performanceCounters->ResetCounter(PCNT_RENDER_OBJECTS);
+        m_performanceCounters->ResetCounter(PCNT_RENDER_INTERFACE);
+        m_performanceCounters->ResetCounter(PCNT_RENDER_SHADOW_MAP);
+        m_performanceCounters->ResetCounter(PCNT_ALL_MAIN);
+
+        m_performanceCounters->StartCounter(PCNT_ALL_MAIN);
+        m_performanceCounters->StartCounter(PCNT_EVENT_RECIEVING);
 
         // To be sure no old event remains
         m_private->currentEvent.type = SDL_NOEVENT;
@@ -940,7 +951,10 @@ int CApplication::Run()
                 Event event = ProcessSystemEvent();
 
                 if (event.type == EVENT_SYS_QUIT)
+                {
+                    m_running = false;
                     goto end; // exit the loop
+                }
 
                 Event virtualEvent = CreateVirtualEvent(event);
 
@@ -960,76 +974,240 @@ int CApplication::Run()
             Event event = ProcessSystemEvent();
 
             if (event.type == EVENT_SYS_QUIT)
+            {
+                m_running = false;
                 goto end; // exit the loop
+            }
 
             if (event.type != EVENT_NULL)
                 m_eventQueue->AddEvent(std::move(event));
         }
 
-        // Enter game update & frame rendering only if active
+        m_performanceCounters->StopCounter(PCNT_EVENT_RECIEVING);
+
+        // Enter frame rendering only if active
         if (m_active)
         {
-            while (! m_eventQueue->IsEmpty())
-            {
-                Event event = m_eventQueue->GetEvent();
-
-                if (event.type == EVENT_SYS_QUIT || event.type == EVENT_QUIT)
-                    goto end; // exit both loops
-
-                LogEvent(event);
-
-                bool passOn = true;
-                if (m_engine != nullptr)
-                    passOn = m_engine->ProcessEvent(event);
-
-                if (passOn && m_controller != nullptr)
-                    m_controller->ProcessEvent(event);
-            }
-
-            StopPerformanceCounter(PCNT_EVENT_PROCESSING);
-
-            StartPerformanceCounter(PCNT_UPDATE_ALL);
-
-            // Prepare and process step simulation event
-            Event event = CreateUpdateEvent();
-            if (event.type != EVENT_NULL && m_controller != nullptr)
-            {
-                LogEvent(event);
-
-                m_sound->FrameMove(m_relTime);
-
-                StartPerformanceCounter(PCNT_UPDATE_GAME);
-                m_controller->ProcessEvent(event);
-                StopPerformanceCounter(PCNT_UPDATE_GAME);
-
-                StartPerformanceCounter(PCNT_UPDATE_ENGINE);
-                m_engine->FrameUpdate();
-                StopPerformanceCounter(PCNT_UPDATE_ENGINE);
-            }
-
-            StopPerformanceCounter(PCNT_UPDATE_ALL);
+            m_performanceCounters->StartCounter(PCNT_PRERENDER);
+            m_controller->GetRobotMain()->RenderUpdate();
 
             /* Update mouse position explicitly right before rendering
              * because mouse events are usually way behind */
             UpdateMouse();
+            m_performanceCounters->StopCounter(PCNT_PRERENDER);
 
-            StartPerformanceCounter(PCNT_RENDER_ALL);
-            Render();
-            StopPerformanceCounter(PCNT_RENDER_ALL);
+            m_performanceCounters->StartCounter(PCNT_RENDER_ALL);
+            m_engine->Render();
+            m_performanceCounters->StopCounter(PCNT_RENDER_ALL);
+        }
+        m_performanceCounters->StopCounter(PCNT_ALL_MAIN);
 
-            StopPerformanceCounter(PCNT_ALL);
+        m_performanceCounters->UpdateCounterData(PCNT_EVENT_RECIEVING);
+        m_performanceCounters->UpdateCounterData(PCNT_PRERENDER);
+        m_performanceCounters->UpdateCounterData(PCNT_RENDER_ALL);
+        m_performanceCounters->UpdateCounterData(PCNT_RENDER_PARTICLE);
+        m_performanceCounters->UpdateCounterData(PCNT_RENDER_WATER);
+        m_performanceCounters->UpdateCounterData(PCNT_RENDER_TERRAIN);
+        m_performanceCounters->UpdateCounterData(PCNT_RENDER_OBJECTS);
+        m_performanceCounters->UpdateCounterData(PCNT_RENDER_INTERFACE);
+        m_performanceCounters->UpdateCounterData(PCNT_RENDER_SHADOW_MAP);
+        m_performanceCounters->UpdateCounterData(PCNT_ALL_MAIN);
 
-            UpdatePerformanceCountersData();
-
-            if (m_lowCPU)
-            {
-                m_systemUtils->Usleep(20000); // should still give plenty of fps
-            }
+        m_finishedFrameSignal->Signal();
+        SDL_UnlockMutex(**m_updateMutex);
+        if (m_active)
+        {
+            if (m_deviceConfig.doubleBuf)
+                SDL_GL_SwapBuffers();
         }
     }
 
 end:
+    GetLogger()->Debug("Exiting main loop\n");
+    SDL_UnlockMutex(**m_updateMutex);
+    SDL_WaitThread(**updateThread, nullptr);
     return m_exitCode;
+}
+
+void CApplication::RunUpdateThread()
+{
+    const long long TIME_STEP = (1.f/80.f) * 1e9f;
+    const long long TIME_STEP_MAX = (1.f/20.f) * 1e9f;
+    long long remainingTime = 0;
+    SystemTimeStamp* startStamp = m_systemUtils->CreateTimeStamp();
+    SystemTimeStamp* stamp = m_systemUtils->CreateTimeStamp();
+    while (m_running)
+    {
+        // Enter game update only if active
+        if (m_active)
+        {
+            // Prepare and process step simulation event
+            if (!m_simulationSuspended)
+            {
+                long long timeStep = TIME_STEP;
+                if (m_simulationSpeed > 1.0f)
+                    timeStep *= sqrt(m_simulationSpeed);
+
+                if (timeStep > TIME_STEP_MAX)
+                {
+                    GetLogger()->Warn("Decreasing time step to increase simulation stability! %.2fms to %.2fms\n", timeStep/1e6f, TIME_STEP_MAX/1e6f);
+                    timeStep = TIME_STEP_MAX;
+                }
+
+                while (true)
+                {
+                    m_systemUtils->CopyTimeStamp(m_lastTimeStamp, m_curTimeStamp);
+                    m_systemUtils->GetCurrentTimeStamp(m_curTimeStamp);
+
+                    long long absDiff = m_systemUtils->TimeStampExactDiff(m_baseTimeStamp, m_curTimeStamp);
+                    long long newRealAbsTime = m_realAbsTimeBase + absDiff;
+                    long long newRealRelTime = m_systemUtils->TimeStampExactDiff(m_lastTimeStamp, m_curTimeStamp);
+
+                    if (newRealAbsTime < m_realAbsTime || newRealRelTime < 0)
+                    {
+                        GetLogger()->Error("Fatal error: got negative system counter difference!\n");
+                        GetLogger()->Error("This should never happen. Please report this error.\n");
+                        //m_eventQueue->AddEvent(Event(EVENT_SYS_QUIT));
+                        goto end;
+                    }
+
+                    m_realAbsTime = newRealAbsTime;
+                    // m_baseTimeStamp is updated on simulation speed change, so this is OK
+                    m_exactAbsTime = m_absTimeBase + m_simulationSpeed * absDiff;
+                    m_absTime = (m_absTimeBase + m_simulationSpeed * absDiff) / 1e9f;
+
+                    remainingTime += newRealRelTime * m_simulationSpeed;
+
+                    if (m_lowCPU)
+                    {
+                        timeStep = remainingTime;
+                    }
+
+                    if (remainingTime < timeStep)
+                    {
+                        m_systemUtils->Usleep((timeStep - remainingTime) / 1e3f);
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+
+                m_systemUtils->GetCurrentTimeStamp(startStamp);
+                long long totalTime = remainingTime/m_simulationSpeed;
+                while (remainingTime >= timeStep)
+                {
+                    m_systemUtils->GetCurrentTimeStamp(stamp);
+                    if (m_systemUtils->TimeStampExactDiff(startStamp, stamp) > totalTime)
+                    {
+                        GetLogger()->Warn("Not keeping up, skipping updates. The game will slow down.\n");
+                        remainingTime = 0;
+                        break;
+                    }
+
+                    SDL_LockMutex(**m_updateMutex);
+
+                    m_performanceCounters->ResetCounter(PCNT_EVENT_PROCESSING);
+                    m_performanceCounters->ResetCounter(PCNT_UPDATE_ALL);
+                    m_performanceCounters->ResetCounter(PCNT_UPDATE_ENGINE);
+                    m_performanceCounters->ResetCounter(PCNT_UPDATE_PARTICLE);
+                    m_performanceCounters->ResetCounter(PCNT_UPDATE_GAME);
+                    m_performanceCounters->ResetCounter(PCNT_ALL_UPDATE);
+
+                    m_performanceCounters->StartCounter(PCNT_ALL_UPDATE);
+
+                    m_engine->SetStatisticTimeStep(timeStep / 1e6f);
+
+                    m_performanceCounters->StartCounter(PCNT_EVENT_PROCESSING);
+                    while (! m_eventQueue->IsEmpty())
+                    {
+                        Event event = m_eventQueue->GetEvent();
+
+                        if (event.type == EVENT_SYS_QUIT || event.type == EVENT_QUIT)
+                            goto end; // exit both loops
+
+                        LogEvent(event);
+
+                        bool passOn = true;
+                        if (m_engine != nullptr)
+                            passOn = m_engine->ProcessEvent(event);
+
+                        if (passOn && m_controller != nullptr)
+                            m_controller->ProcessEvent(event);
+                    }
+                    m_performanceCounters->StopCounter(PCNT_EVENT_PROCESSING);
+
+
+                    m_realRelTime = timeStep / m_simulationSpeed;
+                    m_exactRelTime = timeStep;
+                    m_relTime = timeStep / 1e9f;
+
+                    ExecuteUpdate();
+
+                    remainingTime -= timeStep;
+
+                    m_performanceCounters->StopCounter(PCNT_ALL_UPDATE);
+
+                    m_performanceCounters->UpdateCounterData(PCNT_EVENT_PROCESSING);
+                    m_performanceCounters->UpdateCounterData(PCNT_UPDATE_ALL);
+                    m_performanceCounters->UpdateCounterData(PCNT_UPDATE_ENGINE);
+                    m_performanceCounters->UpdateCounterData(PCNT_UPDATE_PARTICLE);
+                    m_performanceCounters->UpdateCounterData(PCNT_UPDATE_GAME);
+                    m_performanceCounters->UpdateCounterData(PCNT_ALL_UPDATE);
+
+                    m_finishedFrameSignal->Clear();
+                    m_startFrameSignal->Signal();
+                    SDL_UnlockMutex(**m_updateMutex);
+
+                    if (m_lowCPU)
+                    {
+                        m_finishedFrameSignal->Wait();
+                    }
+                }
+                m_systemUtils->Usleep(100); // enough time for the other thread to lock the mutex if needed. TODO: how to do this better?
+            }
+        }
+    }
+
+    end:
+    GetLogger()->Debug("Exiting update loop\n");
+    m_running = false;
+    SDL_UnlockMutex(**m_updateMutex);
+    m_startFrameSignal->Signal(); // Let it continue and exit
+}
+
+void CApplication::ExecuteUpdate()
+{
+    m_performanceCounters->StartCounter(PCNT_UPDATE_ALL);
+    Event event = CreateUpdateEvent();
+    if (event.type != EVENT_NULL && m_controller != nullptr)
+    {
+        LogEvent(event);
+
+        m_sound->FrameMove(m_relTime);
+
+        m_performanceCounters->StartCounter(PCNT_UPDATE_GAME);
+        m_controller->ProcessEvent(event);
+        m_performanceCounters->StopCounter(PCNT_UPDATE_GAME);
+
+        m_performanceCounters->StartCounter(PCNT_UPDATE_ENGINE);
+        m_engine->FrameUpdate();
+        m_performanceCounters->StopCounter(PCNT_UPDATE_ENGINE);
+    }
+    m_performanceCounters->StopCounter(PCNT_UPDATE_ALL);
+}
+
+void CApplication::RenderNextFrame()
+{
+    m_startFrameSignal->Signal(); // Allow next frame to be rendered
+    SDL_UnlockMutex(**m_updateMutex);
+    m_systemUtils->Usleep(100); // enough time for the other thread to lock the mutex if needed. TODO: how to do this better?
+    SDL_LockMutex(**m_updateMutex);
+}
+
+CPerformanceCounters* CApplication::GetPerformanceCounters()
+{
+    return m_performanceCounters.get();
 }
 
 int CApplication::GetExitCode() const
@@ -1306,15 +1484,6 @@ Event CApplication::CreateVirtualEvent(const Event& sourceEvent)
     return virtualEvent;
 }
 
-/** Renders the frame and swaps buffers as necessary */
-void CApplication::Render()
-{
-    m_engine->Render();
-
-    if (m_deviceConfig.doubleBuf)
-        SDL_GL_SwapBuffers();
-}
-
 void CApplication::SuspendSimulation()
 {
     m_simulationSuspended = true;
@@ -1362,35 +1531,6 @@ void CApplication::SetSimulationSpeed(float speed)
 
 Event CApplication::CreateUpdateEvent()
 {
-    if (m_simulationSuspended)
-        return Event(EVENT_NULL);
-
-    m_systemUtils->CopyTimeStamp(m_lastTimeStamp, m_curTimeStamp);
-    m_systemUtils->GetCurrentTimeStamp(m_curTimeStamp);
-
-    long long absDiff = m_systemUtils->TimeStampExactDiff(m_baseTimeStamp, m_curTimeStamp);
-    long long newRealAbsTime = m_realAbsTimeBase + absDiff;
-    long long newRealRelTime = m_systemUtils->TimeStampExactDiff(m_lastTimeStamp, m_curTimeStamp);
-
-    if (newRealAbsTime < m_realAbsTime || newRealRelTime < 0)
-    {
-        GetLogger()->Error("Fatal error: got negative system counter difference!\n");
-        GetLogger()->Error("This should never happen. Please report this error.\n");
-        m_eventQueue->AddEvent(Event(EVENT_SYS_QUIT));
-        return Event(EVENT_NULL);
-    }
-    else
-    {
-        m_realAbsTime = newRealAbsTime;
-        // m_baseTimeStamp is updated on simulation speed change, so this is OK
-        m_exactAbsTime = m_absTimeBase + m_simulationSpeed * absDiff;
-        m_absTime = (m_absTimeBase + m_simulationSpeed * absDiff) / 1e9f;
-
-        m_realRelTime = newRealRelTime;
-        m_exactRelTime = m_simulationSpeed * m_realRelTime;
-        m_relTime = (m_simulationSpeed * m_realRelTime) / 1e9f;
-    }
-
     Event frameEvent(EVENT_FRAME);
     m_input->EventProcess(frameEvent);
     frameEvent.rTime = m_relTime;
@@ -1799,45 +1939,6 @@ void CApplication::SetLowCPU(bool low)
 bool CApplication::GetLowCPU() const
 {
     return m_lowCPU;
-}
-
-void CApplication::StartPerformanceCounter(PerformanceCounter counter)
-{
-    m_systemUtils->GetCurrentTimeStamp(m_performanceCounters[counter][0]);
-}
-
-void CApplication::StopPerformanceCounter(PerformanceCounter counter)
-{
-    m_systemUtils->GetCurrentTimeStamp(m_performanceCounters[counter][1]);
-}
-
-float CApplication::GetPerformanceCounterData(PerformanceCounter counter) const
-{
-    return m_performanceCountersData[counter];
-}
-
-void CApplication::ResetPerformanceCounters()
-{
-    for (int i = 0; i < PCNT_MAX; ++i)
-    {
-        StartPerformanceCounter(static_cast<PerformanceCounter>(i));
-        StopPerformanceCounter(static_cast<PerformanceCounter>(i));
-    }
-}
-
-void CApplication::UpdatePerformanceCountersData()
-{
-    long long sum = m_systemUtils->TimeStampExactDiff(m_performanceCounters[PCNT_ALL][0],
-                                                      m_performanceCounters[PCNT_ALL][1]);
-
-    for (int i = 0; i < PCNT_MAX; ++i)
-    {
-        long long diff = m_systemUtils->TimeStampExactDiff(m_performanceCounters[i][0],
-                                                           m_performanceCounters[i][1]);
-
-        m_performanceCountersData[static_cast<PerformanceCounter>(i)] =
-            static_cast<float>(diff) / static_cast<float>(sum);
-    }
 }
 
 bool CApplication::GetSceneTestMode()

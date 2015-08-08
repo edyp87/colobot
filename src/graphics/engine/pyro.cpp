@@ -1593,7 +1593,7 @@ void CPyro::ExploStart()
         if (channel != -1)
             m_object->SetMasterParticle(i, channel);
     }
-    m_engine->LoadTexture("textures/dirty04.png");
+    m_engine->LoadAllTextures();
 
     DeleteObject(false, true);  // destroys the object transported + the battery
 }
@@ -1636,7 +1636,7 @@ void CPyro::BurnStart()
             m_engine->ChangeSecondTexture(objRank, "dirty04.png");
         }
     }
-    m_engine->LoadTexture("textures/dirty04.png");
+    m_engine->LoadAllTextures();
 
     m_burnPartTotal = 0;
 
@@ -2405,4 +2405,3 @@ void CPyro::LightOperFrame(float rTime)
 
 
 } // namespace Gfx
-

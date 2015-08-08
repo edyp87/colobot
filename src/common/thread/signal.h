@@ -19,32 +19,45 @@
 
 #pragma once
 
-#include <SDL_thread.h>
+#include "common/thread/sdl_cond_wrapper.h"
+#include "common/thread/sdl_mutex_wrapper.h"
 
-/**
- * \class CSDLCondWrapper
- * \brief Wrapper for safe creation/deletion of SDL_cond
- */
-class CSDLCondWrapper
+class CSignal
 {
 public:
-    CSDLCondWrapper()
-        : m_cond(SDL_CreateCond())
-    {}
-
-    ~CSDLCondWrapper()
+    CSignal(CSDLMutexWrapper* mutex)
+        : m_mutex(mutex)
     {
-        SDL_DestroyCond(m_cond);
+        m_cond = MakeUnique<CSDLCondWrapper>();
+        m_condition = false;
     }
 
-    CSDLCondWrapper(const CSDLCondWrapper&) = delete;
-    CSDLCondWrapper& operator=(const CSDLCondWrapper&) = delete;
+    ~CSignal()
+    {}
 
-    SDL_cond* operator*()
+    //! Waits for signal. Assumes the mutex is locked
+    void Wait()
     {
-        return m_cond;
+        while(!m_condition)
+            SDL_CondWait(**m_cond, **m_mutex);
+        m_condition = false;
+    }
+
+    //! Signals the other thread
+    void Signal()
+    {
+        m_condition = true;
+        SDL_CondSignal(**m_cond);
+    }
+
+    //! Clears the condition flag
+    void Clear()
+    {
+        m_condition = false;
     }
 
 private:
-    SDL_cond* m_cond;
+    CSDLMutexWrapper* m_mutex;
+    std::unique_ptr<CSDLCondWrapper> m_cond;
+    bool m_condition;
 };

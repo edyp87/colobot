@@ -45,6 +45,9 @@ class CInput;
 class CPathManager;
 class CSystemUtils;
 struct SystemTimeStamp;
+class CSDLMutexWrapper;
+class CSignal;
+class CPerformanceCounters;
 
 namespace Gfx
 {
@@ -103,32 +106,6 @@ enum MouseMode
     MOUSE_ENGINE, //! < in-game cursor visible; system cursor hidden
     MOUSE_BOTH,   //! < both cursors visible (only for debug)
     MOUSE_NONE,   //! < no cursor visible
-};
-
-/**
- * \enum PerformanceCounter
- * \brief Type of counter testing performance
- */
-enum PerformanceCounter
-{
-    PCNT_EVENT_PROCESSING, //! < event processing (except update events)
-
-    PCNT_UPDATE_ALL,            //! < the whole frame update process
-    PCNT_UPDATE_ENGINE,         //! < frame update in CEngine
-    PCNT_UPDATE_PARTICLE,       //! < frame update in CParticle
-    PCNT_UPDATE_GAME,           //! < frame update in CRobotMain
-
-    PCNT_RENDER_ALL,            //! < the whole rendering process
-    PCNT_RENDER_PARTICLE,       //! < rendering the particles in 3D
-    PCNT_RENDER_WATER,          //! < rendering the water
-    PCNT_RENDER_TERRAIN,        //! < rendering the terrain
-    PCNT_RENDER_OBJECTS,        //! < rendering the 3D objects
-    PCNT_RENDER_INTERFACE,      //! < rendering 2D interface
-    PCNT_RENDER_SHADOW_MAP,     //! < rendering shadow map
-
-    PCNT_ALL,                   //! < all counters together
-
-    PCNT_MAX
 };
 
 enum DebugMode
@@ -197,6 +174,8 @@ public:
     CEventQueue* GetEventQueue();
     //! Returns the sound subsystem
     CSoundInterface* GetSound();
+    //! Returns the performance counters
+    CPerformanceCounters* GetPerformanceCounters();
 
 public:
     //! Parses commandline arguments
@@ -225,6 +204,9 @@ public:
 
     //! Change the video mode to given mode
     bool        ChangeVideoConfig(const Gfx::DeviceConfig &newConfig);
+
+    //! Allows next frame to be rendered. This is to be called from the update thread.
+    void        RenderNextFrame();
 
     //! Suspends animation (time will not be updated)
     void        SuspendSimulation();
@@ -315,21 +297,17 @@ public:
     bool        GetLowCPU() const;
     //@}
 
-    //! Management of performance counters
-    //@{
-    void        StartPerformanceCounter(PerformanceCounter counter);
-    void        StopPerformanceCounter(PerformanceCounter counter);
-    float       GetPerformanceCounterData(PerformanceCounter counter) const;
-    //@}
-
     bool        GetSceneTestMode();
-    
-    //! Renders the image in window
-    void        Render();
 
 protected:
     //! Creates the window's SDL_Surface
     bool CreateVideoSurface();
+
+    //! Update thread function
+    void RunUpdateThread();
+
+    //! Execute one update
+    void ExecuteUpdate();
 
     //! Processes the captured SDL event to Event struct
     Event       ProcessSystemEvent();
@@ -347,11 +325,6 @@ protected:
 
     //! Internal procedure to reset time counters
     void InternalResumeSimulation();
-
-    //! Resets all performance counters to zero
-    void ResetPerformanceCounters();
-    //! Updates performance counters from gathered timer data
-    void UpdatePerformanceCountersData();
 
 protected:
     //! System utils instance
@@ -374,6 +347,8 @@ protected:
     std::unique_ptr<CInput> m_input;
     //! Path manager
     std::unique_ptr<CPathManager> m_pathManager;
+    //! Performance counters
+    std::unique_ptr<CPerformanceCounters> m_performanceCounters;
 
     //! Code to return at exit
     int             m_exitCode;
@@ -383,6 +358,14 @@ protected:
     long            m_debugModes;
     //! If we are restarting the app
     bool            m_restart;
+    //! false on exit
+    bool            m_running;
+    //! Update thread mutex
+    std::unique_ptr<CSDLMutexWrapper> m_updateMutex;
+    //! Start frame signal
+    std::unique_ptr<CSignal> m_startFrameSignal;
+    //! Finished frame signal
+    std::unique_ptr<CSignal> m_finishedFrameSignal;
 
     //! Message to be displayed as error to the user
     std::string     m_errorMessage;
@@ -400,9 +383,6 @@ protected:
     SystemTimeStamp* m_baseTimeStamp;
     SystemTimeStamp* m_lastTimeStamp;
     SystemTimeStamp* m_curTimeStamp;
-
-    SystemTimeStamp* m_performanceCounters[PCNT_MAX][2];
-    float            m_performanceCountersData[PCNT_MAX];
 
     long long       m_realAbsTimeBase;
     long long       m_realAbsTime;
