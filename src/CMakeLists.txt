@@ -136,6 +136,7 @@ set(BASE_SOURCES
     level/parser/parserline.cpp
     level/parser/parserparam.cpp
     object/auto/auto.cpp
+    object/auto/autodelegate.cpp
     object/auto/autobase.cpp
     object/auto/autoconvert.cpp
     object/auto/autoderrick.cpp

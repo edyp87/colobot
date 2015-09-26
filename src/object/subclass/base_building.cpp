@@ -28,6 +28,7 @@
 
 #include "object/object_create_params.h"
 
+#include "object/auto/autodelegate.h"
 #include "object/auto/autobase.h"
 #include "object/auto/autoconvert.h"
 #include "object/auto/autoderrick.h"
@@ -808,7 +809,7 @@ std::unique_ptr<CBaseBuilding> CBaseBuilding::Create(
     std::unique_ptr<CAuto> objAuto;
     if ( params.type == OBJECT_BASE )
     {
-        objAuto = MakeUnique<CAutoBase>(obj.get());
+        objAuto = MakeUnique<CAutoDelegate>(obj.get(), std::move(MakeUnique<CAutoBase>(obj.get())));
     }
     if ( params.type == OBJECT_PORTICO )
     {
